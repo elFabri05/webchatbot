@@ -1,0 +1,40 @@
+services:
+  mock-mcp:
+    build: .
+    # Seed only on first start; `make reset-db` refreshes the data (fresh "last 24h").
+    command: sh -c "python scripts/reset_db.py --skip-app --if-missing && python -m mock_mcp.server --http --host 0.0.0.0 --port 8001"
+    environment:
+      MOCK_DB_PATH: /srv/data/isp.db
+      MOCK_MCP_ALLOWED_HOSTS: "mock-mcp:*,localhost:*,127.0.0.1:*"
+    volumes:
+      - mockdata:/srv/data
+    ports:
+      - "127.0.0.1:8001:8001"    # host access for scripts/compare_tools.py
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8001), 2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      # Overrides .env: in compose the mock is reached over HTTP.
+      # For the real tracker set MCP_SIGNAL_SERVER_DOCKER (see README); no code changes.
+      MCP_SIGNAL_SERVER: ${MCP_SIGNAL_SERVER_DOCKER:-http://mock-mcp:8001/mcp}
+      APP_DB_PATH: /srv/data/app.db
+    volumes:
+      - appdata:/srv/data
+    ports:
+      - "127.0.0.1:8000:8000"    # localhost only: /admin has no authentication
+    depends_on:
+      mock-mcp:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mockdata:
+  appdata:

@@ -1,0 +1,19 @@
+[project]
+name = "isp-support-bot"
+version = "0.1.0"
+description = "ISP support chatbot – trial with mock signal-tracker MCP server"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "mcp>=1.9",
+    "pydantic-settings>=2.4",
+    "anthropic>=2.7.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

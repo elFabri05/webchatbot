@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soporte · Admin</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --surface: #ffffff; --text: #1b1f24; --muted: #667085; --border: #e3e6ea;
+    --accent: #0b6bcb; --row-hover: #f8f9fb; --code-bg: #f6f8fa;
+    --low: #475467; --low-bg: #f2f4f7; --med: #8a4b00; --med-bg: #fff4e5;
+    --high: #b42318; --high-bg: #fdecea; --crit: #ffffff; --crit-bg: #b42318;
+    --ok: #1f7a4d; --ok-bg: #e6f4ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --surface: #171b21; --text: #e6e8eb; --muted: #98a2b3; --border: #2a313a;
+      --accent: #4a9eff; --row-hover: #1c222a; --code-bg: #11151a;
+      --low: #c0c7d2; --low-bg: #252c35; --med: #f5c26b; --med-bg: #2b2111;
+      --high: #ff8a80; --high-bg: #2d1514; --crit: #ffffff; --crit-bg: #c4321f;
+      --ok: #5cc98f; --ok-bg: #12291d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  a { color: var(--accent); }
+  button { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 8px; cursor: pointer;
+           border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+  button:hover { border-color: var(--muted); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .card .k { font-size: 12px; color: var(--muted); }
+  .card .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .card .h { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 20px; overflow: hidden; }
+  section h2 { font-size: 14px; margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border);
+               display: flex; justify-content: space-between; }
+  section h2 .count { color: var(--muted); font-weight: 400; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  tr.conv { cursor: pointer; }
+  tr.conv:hover td { background: var(--row-hover); }
+  td.mono, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; white-space: nowrap; }
+  .muted { color: var(--muted); }
+  .empty { padding: 16px 14px; color: var(--muted); }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 99px; white-space: nowrap; }
+  .sev-low { color: var(--low); background: var(--low-bg); }
+  .sev-medium { color: var(--med); background: var(--med-bg); }
+  .sev-high { color: var(--high); background: var(--high-bg); }
+  .sev-critical { color: var(--crit); background: var(--crit-bg); }
+  .st-active { color: var(--ok); background: var(--ok-bg); }
+  .st-handoff { color: var(--med); background: var(--med-bg); }
+
+  tr.detail td { background: var(--bg); padding: 12px 14px; }
+  .transcript { display: flex; flex-direction: column; gap: 8px; max-width: 820px; }
+  .t-msg { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); }
+  .t-msg.user { border-left: 3px solid var(--accent); }
+  .t-head { font-size: 11px; color: var(--muted); margin-bottom: 3px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .t-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  details.calls { margin-top: 6px; font-size: 12px; }
+  details.calls summary { cursor: pointer; color: var(--muted); }
+  details.calls pre { margin: 4px 0 0; padding: 6px 8px; background: var(--code-bg); border-radius: 6px;
+                      max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+                      font: 11.5px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  .summary-box { font-size: 12px; padding: 8px 10px; border-radius: 8px; background: var(--surface);
+                 border: 1px dashed var(--border); margin-bottom: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div style="flex:1">
+      <h1>Soporte · Admin</h1>
+      <div class="sub" id="sub">Cargando…</div>
+    </div>
+    <a href="/">Abrir chat</a>
+    <button id="refresh" type="button">Actualizar</button>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>Conversaciones <span class="count" id="convCount"></span></h2>
+    <div class="scroll"><table>
+      <thead><tr>
+        <th>Conversación</th><th>Cliente</th><th>Estado</th><th class="num">Mensajes</th>
+        <th class="num">Herram.</th><th class="num">Entrada</th><th class="num">Caché leída</th>
+        <th class="num">Caché escrita</th><th class="num">Salida</th><th class="num">% caché</th><th>Última actividad</th>
+      </tr></thead>
+      <tbody id="convs"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>Tickets <span class="count" id="ticketCount"></span></h2>
+    <div class="scroll"><table>
+      <thead><tr><th>#</th><th>Cliente</th><th>Severidad</th><th>Resumen</th><th>Estado</th><th>Conversación</th><th>Creado</th></tr></thead>
+      <tbody id="tickets"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>Derivaciones a persona <span class="count" id="handoffCount"></span></h2>
+    <div class="scroll"><table>
+      <thead><tr><th>#</th><th>Conversación</th><th>Motivo</th><th>Estado</th><th>Creada</th></tr></thead>
+      <tbody id="handoffs"></tbody>
+    </table></div>
+  </section>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const nf = (n) => (n || 0).toLocaleString("es-ES");
+const when = (iso) => iso ? new Date(iso).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" }) : "";
+const SEV = { low: "baja", medium: "media", high: "alta", critical: "crítica" };
+const STATUS = { active: "activa", handoff: "derivada" };
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function td(text, cls) { return el("td", cls, text); }
+function badge(text, cls) { const t = el("td"); t.append(el("span", "badge " + cls, text)); return t; }
+function emptyRow(tbody, cols, text) {
+  const tr = el("tr"); const c = el("td", "empty", text); c.colSpan = cols; tr.append(c); tbody.replaceChildren(tr);
+}
+function hitRate(r) {
+  const total = r.input_tokens + r.cache_read_tokens + r.cache_write_tokens;
+  return total ? Math.round(100 * r.cache_read_tokens / total) + "%" : "–";
+}
+function card(k, v, h) {
+  const c = el("div", "card"); c.append(el("div", "k", k), el("div", "v", v));
+  if (h) c.append(el("div", "h", h));
+  return c;
+}
+
+function renderCards(d, nTickets) {
+  const t = d.totals;
+  const inTotal = t.input_tokens + t.cache_read_tokens + t.cache_write_tokens;
+  $("#cards").replaceChildren(
+    card("Conversaciones", nf(t.conversations)),
+    card("Derivadas", nf(t.handoffs)),
+    card("Tickets", nf(nTickets)),
+    card("Tokens de entrada", nf(inTotal), `${nf(t.input_tokens)} sin caché`),
+    card("Tokens de salida", nf(t.output_tokens), "incluye razonamiento"),
+    card("Lectura de caché", hitRate(t), `${nf(t.cache_read_tokens)} leídos · ${nf(t.cache_write_tokens)} escritos`),
+  );
+}
+
+function renderConversations(rows) {
+  const tb = $("#convs");
+  $("#convCount").textContent = rows.length;
+  if (!rows.length) return emptyRow(tb, 11, "Todavía no hay conversaciones.");
+  tb.replaceChildren();
+  for (const r of rows) {
+    const tr = el("tr", "conv");
+    tr.title = "Ver conversación";
+    tr.append(
+      td(r.conversation_id, "mono"),
+      td(r.customer ? `${r.customer.name} (${r.customer.customer_id})` : "sin identificar", r.customer ? "" : "muted"),
+      badge(STATUS[r.status] || r.status, "st-" + r.status),
+      td(nf(r.messages), "num"), td(nf(r.tool_calls), "num"),
+      td(nf(r.input_tokens), "num"), td(nf(r.cache_read_tokens), "num"),
+      td(nf(r.cache_write_tokens), "num"), td(nf(r.output_tokens), "num"),
+      td(hitRate(r), "num"), td(when(r.updated_at), "muted"),
+    );
+    tr.onclick = () => toggleDetail(tr, r.conversation_id);
+    tb.append(tr);
+  }
+}
+
+async function toggleDetail(tr, id) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains("detail")) return next.remove();
+  const row = el("tr", "detail"); const cell = el("td"); cell.colSpan = 11;
+  cell.textContent = "Cargando…"; row.append(cell); tr.after(row);
+  try {
+    const r = await fetch(`/admin/api/conversations/${encodeURIComponent(id)}`);
+    const d = await r.json();
+    const box = el("div", "transcript");
+    const open = el("a", null, "Abrir en el chat →");
+    open.href = "/?conversation=" + encodeURIComponent(id);
+    open.onclick = (e) => e.stopPropagation();
+    box.append(open);
+    if (d.summary) box.append(el("div", "summary-box", "Resumen acumulado: " + d.summary));
+    for (const m of d.messages) {
+      const msg = el("div", "t-msg " + m.role);
+      const head = el("div", "t-head");
+      head.append(el("strong", null, m.role === "user" ? "Cliente" : "Asistente"), el("span", null, when(m.created_at)));
+      const u = m.usage;
+      if (m.role === "assistant" && (u.input_tokens || u.output_tokens)) {
+        head.append(el("span", null,
+          `entrada ${nf(u.input_tokens)} · caché ${nf(u.cache_read_input_tokens)}/${nf(u.cache_creation_input_tokens)} · salida ${nf(u.output_tokens)}`));
+      }
+      msg.append(head, el("div", "t-text", m.content));
+      if (m.tool_calls.length) {
+        const det = el("details", "calls");
+        det.append(el("summary", null, "Herramientas: " + m.tool_calls.map(c => c.name + (c.is_error ? " ⚠" : "")).join(", ")));
+        for (const c of m.tool_calls) {
+          let out = c.output; try { out = JSON.stringify(JSON.parse(out), null, 2); } catch {}
+          det.append(el("pre", null, `${c.name}(${JSON.stringify(c.input)})\n→ ${out}`));
+        }
+        msg.append(det);
+      }
+      box.append(msg);
+    }
+    cell.replaceChildren(box);
+  } catch {
+    cell.textContent = "No se pudo cargar la conversación.";
+  }
+}
+
+function renderTickets(rows) {
+  const tb = $("#tickets");
+  $("#ticketCount").textContent = rows.length;
+  if (!rows.length) return emptyRow(tb, 7, "Sin tickets.");
+  tb.replaceChildren();
+  for (const t of rows) {
+    const tr = el("tr");
+    tr.append(td(t.ticket_id ?? "–", "mono"), td(t.customer_id ?? "–", "mono"),
+              badge(SEV[t.severity] || t.severity || "–", "sev-" + t.severity),
+              td(t.summary ?? t.raw ?? ""), td(t.status ?? ""), td(t.conversation_id, "mono"),
+              td(when(t.created_at || t.logged_at), "muted"));
+    tb.append(tr);
+  }
+}
+
+function renderHandoffs(rows) {
+  const tb = $("#handoffs");
+  $("#handoffCount").textContent = rows.length;
+  if (!rows.length) return emptyRow(tb, 5, "Sin derivaciones.");
+  tb.replaceChildren();
+  for (const h of rows) {
+    const tr = el("tr");
+    tr.append(td(h.handoff_id ?? "–", "mono"), td(h.conversation_id, "mono"),
+              td(h.reason ?? h.raw ?? ""), td(h.status ?? ""), td(when(h.created_at || h.logged_at), "muted"));
+    tb.append(tr);
+  }
+}
+
+async function load() {
+  try {
+    const r = await fetch("/admin/api/overview");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    renderCards(d, d.tickets.length);
+    renderConversations(d.conversations);
+    renderTickets(d.tickets);
+    renderHandoffs(d.handoffs);
+    $("#sub").textContent = `Modelo ${d.model} · actualizado ${new Date().toLocaleTimeString("es-ES")}`;
+  } catch (e) {
+    $("#sub").textContent = "No se pudieron cargar los datos.";
+    console.error(e);
+  }
+}
+$("#refresh").onclick = load;
+load();
+</script>
+</body>
+</html>
