@@ -7,6 +7,7 @@ same tool interface, so you can switch to the real tracker by changing configura
 
 - **Model:** Claude (`claude-opus-5-5` by default) through the Anthropic API, using a manual tool-use loop with at most 5 tool calls per customer message.
 - **Pages:** a web chat at `/` with a tool-call debug panel, and an admin page at `/admin` listing tickets, handoffs and token usage.
+- **Observability:** self-hosted Langfuse at http://localhost:3000, one trace per customer message with PII masked (§6).
 - **Stack:** FastAPI + uv, SQLite, Docker Compose.
 
 ---
@@ -20,8 +21,10 @@ default credential chain (for example a profile from `ant auth login`).
 
 ```bash
 cp .env.example .env        # then set ANTHROPIC_API_KEY
-docker compose up --build   # or: make up
+make up
 ```
+
+`make up` is `docker compose up --build`, plus `--profile langfuse` when `.env` has `LANGFUSE_ENABLED=true`.
 
 | URL | What |
 |---|---|
@@ -29,10 +32,11 @@ docker compose up --build   # or: make up
 | http://localhost:8000/admin | Admin: tickets, handoffs, token usage per conversation |
 | http://localhost:8000/health | Status and the tools loaded from MCP |
 | http://localhost:8001/mcp | Mock MCP server (for `compare_tools.py`) |
+| http://localhost:3000 | Langfuse: traces of every customer message (§6). Only with `LANGFUSE_ENABLED=true`. |
 
 - The mock seeds its data on first start. The app waits until the mock is healthy.
 - Conversations and mock data live in Docker volumes, so they survive restarts. `docker compose down -v` deletes them.
-- Both ports are bound to `127.0.0.1`, because `/admin` has no authentication.
+- All ports are bound to `127.0.0.1`, because `/admin` has no authentication and Langfuse ships with a default login.
 
 ### Without Docker
 
@@ -61,7 +65,8 @@ started 2 h ago with an ETA 3 h ahead. After a few hours the ETA is in the past 
 
 | Target | |
 |---|---|
-| `make up` / `make down` / `make logs` | Docker Compose stack |
+| `make up` / `make down` / `make logs` | Docker Compose stack (with Langfuse when it's enabled) |
+| `make langfuse-up` | Only Langfuse, to trace a local `make run` |
 | `make install` / `make run` / `make mock-http` | Local development |
 | `make reset-db` | Fresh seed data + clear conversations |
 | `make test` | Test suite, no API calls |
@@ -154,6 +159,9 @@ working with the real servers.
 | `BOT_HISTORY_WINDOW` | `10` | Messages kept verbatim; older ones are summarised |
 | `BOT_TIMEZONE` | `Europe/Madrid` | Local time for ETAs (tools return UTC) |
 | `BOT_FALLBACKS` | `true` | If the model declines a request, the API retries it on a fallback model |
+| `LANGFUSE_ENABLED` | `false` (`true` in `.env.example`) | Start Langfuse with `make up` and send traces to it (§6) |
+| `LANGFUSE_HOST` | `http://localhost:3000` | Langfuse URL for a local run. In Docker the app always uses `http://langfuse-web:3000`. |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | `pk-lf-local-chatbot` / `sk-lf-local-chatbot` | Project API keys. Compose creates the Langfuse project with the same values. |
 | `APP_DB_PATH` | `data/app.db` | Conversations, usage, tool-call log |
 | `MOCK_DB_PATH` | `data/isp.db` | Mock tracker data |
 | `CHAT_DEBUG` | `true` | Return tool calls and usage to the chat page. **Set to `false` before real customers use it.** |
@@ -163,7 +171,7 @@ working with the real servers.
 ## 5. Tests
 
 ```bash
-make test        # 33 tests, no API calls, ~20 s
+make test        # 58 tests, no API calls, ~25 s
 make test-live   # scenario tests with the real model
 ```
 
@@ -182,10 +190,107 @@ make test-live   # scenario tests with the real model
   Assertions are structural, so normal wording variation passes. These tests are skipped unless `RUN_LIVE_TESTS=1`; each run is a few dozen API calls.
 - **`tests/test_bot.py`, `tests/test_api.py`, `tests/test_mock_mcp.py`:** loop mechanics, request and cache layout, history
   window and summary, HTTP endpoints, the mock's tools.
+- **`tests/test_tracing.py`, `tests/test_pii.py`:** the spans a turn produces (captured in memory, nothing is sent): trace
+  shape, session and customer, tokens and cost, tool errors, and that no phone number or customer name is left in them.
 
 ---
 
-## 6. How it works
+## 6. Observability (Langfuse)
+
+Every customer message becomes one trace in a self-hosted [Langfuse](https://langfuse.com). Nothing leaves your machine.
+
+| | |
+|---|---|
+| URL | http://localhost:3000 |
+| Login | `admin@example.com` / `chatbot-langfuse` |
+| Project | **ISP support bot**. Traces: http://localhost:3000/project/isp-support-bot/traces |
+
+### Turning it on and off
+
+`LANGFUSE_ENABLED` in `.env` is the only switch.
+
+- **`true`:** `make up` also starts Langfuse (web, worker, Postgres, ClickHouse, Redis, MinIO; allow about 4 GB of RAM)
+  and the bot exports traces. The organisation, project, API keys and login are created on first start.
+- **`false` or missing:** no Langfuse containers, no client, nothing is sent. The bot behaves the same.
+
+Notes:
+- After changing it, run `make up` again. If you use `docker compose` directly, add `--profile langfuse` yourself.
+- The first start takes a minute or two (database migrations). Messages sent before the UI answers are not traced.
+- Tracing never blocks or fails a chat turn: spans are sent in the background, and if Langfuse is down the app logs an
+  export error and carries on.
+- Local run: `make langfuse-up`, then `make run` with `LANGFUSE_ENABLED=true`.
+- `make down` keeps the traces (Docker volumes); `docker compose --profile langfuse down -v` deletes them.
+
+### How to read a trace
+
+Open **Tracing → Traces**. Each row is one customer message, named `chat-turn`. Click one:
+
+```
+chat-turn                     the whole turn: input = customer message, output = the bot's reply
+├─ summary        generation  only when old messages were folded into the running summary
+├─ llm            generation  1st model call
+├─ find_customer  tool        MCP call
+├─ llm            generation  2nd model call (sees the tool result)
+├─ get_line_status  tool      these two were requested together, so they overlap in the timeline
+├─ get_node_status  tool
+└─ llm            generation  final answer
+```
+
+- **`chat-turn`** (root): the latency is what the customer waited. Metadata has `status` (`active` / `handoff`), the
+  tool names in order, the turn's token totals, and `customer_id`.
+- **`llm`** (one per API request):
+  - *Input* is the full prompt: `system`, `tools`, and `messages` (history, the per-turn context message, and this turn's
+    tool calls and results so far).
+  - *Output* is the model's content blocks: text and `tool_use` calls. Thinking blocks appear empty because the API does
+    not return their text.
+  - *Usage*: `input` (uncached), `output`, `cache_read_input_tokens`, `cache_creation_input_tokens`. A healthy turn has a
+    large `cache_read` from the second call on; if it stays at 0, the cached prefix is being broken.
+  - *Cost* in USD, computed by the app from `app/pricing.py` (list prices, 5-minute cache writes). Update that file when
+    prices or models change.
+  - Metadata has `stop_reason`; model parameters show `effort`, `max_tokens` and `tool_choice` (`none` = the tool budget
+    was spent).
+- **Tool spans** are named after the MCP tool: input arguments, output, and the duration of that call. A failed call is
+  marked red (level `ERROR`) with the error as status message: a tool error, a timeout after `MCP_CALL_TIMEOUT`, an
+  unreachable tracker, or a call refused because the tool budget was spent.
+- **Sessions** (left menu) groups traces by conversation: the session id is the `conversation_id`, the same one as in
+  `/admin` and `?conversation=<id>`. Open a session to read the whole conversation turn by turn with its total cost.
+- **Users** lists customers: once `find_customer` succeeds, traces carry the `customer_id` as user id and a
+  `customer:<id>` tag, so you can filter traces by customer. Messages sent before the customer is identified have no user.
+
+### PII masking
+
+Masking happens in the app (`app/pii.py`) before anything is handed to the Langfuse client, on every input, output,
+metadata value and error message:
+
+| Data | Becomes | How it is found |
+|---|---|---|
+| Phone numbers | `[PHONE]` | Pattern: Spanish 9-digit numbers and `+`/`00` international numbers, with spaces, dots or hyphens. Also any `phone` field. |
+| Customer name | `[NAME]` | The `name` of a customer record, then every occurrence of those words in free text (any case, with or without accents). Also "me llamo …", "soy …", "mi nombre es …". |
+| E-mail, DNI/NIE, address fields | `[EMAIL]`, `[ID]`, `[ADDRESS]` | Pattern or field name |
+
+Ids stay readable on purpose: `customer_id`, account, line, node, incident and ticket ids are how you find a trace.
+
+A turn's payloads are attached when the turn ends, so the customer's name is also masked in the model call that ran
+*before* `find_customer` identified them. Timings are still the real ones.
+
+**Limits.** This is pattern matching, not language understanding:
+- A name the bot never learns is not masked: someone else's name mentioned in passing, or the customer's own name typed
+  without an introduction in a turn where they are not yet identified.
+- A common word that is also the customer's name (Rosa, Cruz) is masked wherever it appears.
+- Street addresses in free text are not detected.
+
+If traces must hold up to a compliance review, put an NER-based detector (for example Microsoft Presidio) behind
+`Masker` in `app/pii.py`, and treat the Langfuse database as personal data until then.
+
+### Before exposing Langfuse beyond localhost
+
+The compose defaults (login, API keys, `NEXTAUTH_SECRET`, `SALT`, `ENCRYPTION_KEY`, database passwords) are public
+placeholders. Set your own in `.env` (the commented block in `.env.example` lists them). The login and API keys are only
+applied when Langfuse first creates its database, so set them before the first start or delete the volumes.
+
+---
+
+## 7. How it works
 
 ```
 browser ──POST /chat──▶ FastAPI ──▶ ChatBot loop ──▶ Claude Messages API
@@ -194,6 +299,8 @@ browser ──POST /chat──▶ FastAPI ──▶ ChatBot loop ──▶ Claud
                                     MCPToolbox ──stdio/HTTP──▶ signal tracker MCP (mock or real)
                                         │
                                SQLite: conversations, messages, usage, tool-call log
+
+ChatBot loop ──masked spans (background)──▶ Langfuse   (only with LANGFUSE_ENABLED=true)
 ```
 
 - **Loop** (`app/bot.py`):
@@ -212,7 +319,7 @@ browser ──POST /chat──▶ FastAPI ──▶ ChatBot loop ──▶ Claud
 - **MCP calls:** one short session per call with a hard timeout. If the tracker crashes, the call fails in milliseconds, and a
   hung tracker hits the timeout; neither takes the app down. Cost: about 50 ms per call over HTTP, about 0.4 s over stdio.
 
-## 7. Project layout
+## 8. Project layout
 
 ```
 app/
@@ -222,6 +329,9 @@ app/
   tool_names.py    the MCP tool names the bot depends on
   mcp_client.py    transport-agnostic MCP client + toolbox
   storage.py       SQLite conversation storage
+  tracing.py       Langfuse traces: one per customer message
+  pii.py           PII masking applied to everything sent to Langfuse
+  pricing.py       Claude list prices for the cost shown in Langfuse
   static/          chat.html, admin.html (no build step)
 mock_mcp/
   contract.py      tool schemas (signal tools PROVISIONAL)
@@ -231,13 +341,15 @@ scripts/           reset_db.py, compare_tools.py, chat.py (terminal client)
 tests/             see §5
 ```
 
-## 8. Known limitations (trial)
+## 9. Known limitations (trial)
 
 - **Signal tool schemas are provisional.** They must be replaced with the real tracker's contract (§3).
 - **`/admin` has no authentication.** Ports are bound to localhost; add authentication before exposing the app.
 - **`CHAT_DEBUG=true` shows tool data to whoever uses the chat.** Turn it off for real customers.
 - **Replies aren't streamed.** The page shows a typing indicator until the full reply arrives.
-- **Not yet verified against the live API or with Docker.** `make test-live` and `make up` haven't been run in the environment
-  where this was built.
+- **`make test-live` hasn't been run.** `make up` has: the full stack starts (Langfuse 4.78.0), and a real conversation
+  produced a complete, masked trace. On its very first start the Langfuse worker logs a few `min_version does not exist`
+  errors while the web container is still migrating the database; they stop once migrations finish.
+- **PII masking in traces is pattern-based** and can miss names (§6).
 # webchatbot
 # webchatbot

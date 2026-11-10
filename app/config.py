@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     bot_timezone: str = "Europe/Madrid"
     bot_fallbacks: bool = True           # server-side refusal fallback ("default" routing)
 
+    # Langfuse tracing (self-hosted, see docker-compose.yml). Off unless enabled.
+    langfuse_enabled: bool = False
+    langfuse_host: str = "http://localhost:3000"
+    langfuse_public_key: str = "pk-lf-local-chatbot"     # match LANGFUSE_INIT_PROJECT_* in compose
+    langfuse_secret_key: str = "sk-lf-local-chatbot"
+
     app_db_path: str = "data/app.db"
     # Return tool calls + token usage to the chat page (debug panel). Off for real customers.
     chat_debug: bool = True

@@ -1,4 +1,9 @@
-.PHONY: help install run mock-http test test-live up down logs reset-db
+.PHONY: help install run mock-http test test-live up down logs reset-db langfuse-up
+
+# Langfuse containers only run when .env has LANGFUSE_ENABLED=true (compose profile).
+LANGFUSE_ON := $(shell grep -Eiq '^LANGFUSE_ENABLED="?(true|1|yes|on)' .env 2>/dev/null && echo 1)
+COMPOSE_UP := docker compose $(if $(LANGFUSE_ON),--profile langfuse)
+COMPOSE_ALL := docker compose --profile langfuse
 
 help:  ## Show targets
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | awk -F ":.*## " "{printf \"  %-10s %s\\n\", \$$1, \$$2}"
@@ -19,14 +24,17 @@ test:  ## Run the test suite (no API calls)
 test-live:  ## Run scenario tests against the REAL Claude API (costs money)
 	RUN_LIVE_TESTS=1 uv run pytest -q -v tests/test_live.py
 
-up:  ## Build and start app + mock MCP with docker compose
-	docker compose up --build
+up:  ## Build and start app + mock MCP (+ Langfuse if LANGFUSE_ENABLED=true in .env)
+	$(COMPOSE_UP) up --build
+
+langfuse-up:  ## Start only Langfuse (http://localhost:3000), e.g. to trace a local `make run`
+	$(COMPOSE_ALL) up -d langfuse-web langfuse-worker
 
 down:  ## Stop the docker compose stack (data volumes are kept)
-	docker compose down
+	$(COMPOSE_ALL) down
 
 logs:  ## Follow docker compose logs
-	docker compose logs -f
+	$(COMPOSE_ALL) logs -f
 
 reset-db:  ## Reset mock tracker data + clear conversations (docker if running, else local)
 	@if docker compose ps --status running --services 2>/dev/null | grep -qx mock-mcp; then \

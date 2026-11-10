@@ -27,7 +27,8 @@ import anthropic
 from app import tool_names as T
 from app.mcp_client import MCPToolbox, ToolResult
 from app.prompts import CONTEXT_TEMPLATE, SUMMARY_SYSTEM, SYSTEM_PROMPT
-from app.storage import StoredMessage, Storage
+from app.storage import Conversation, StoredMessage, Storage
+from app.tracing import Tracer, Turn
 
 log = logging.getLogger(__name__)
 
@@ -66,8 +67,9 @@ class TurnResult:
 
 class ChatBot:
     def __init__(self, client: anthropic.AsyncAnthropic, toolbox: MCPToolbox,
-                 storage: Storage, config: BotConfig):
+                 storage: Storage, config: BotConfig, tracer: Tracer | None = None):
         self.client = client
+        self.tracer = tracer or Tracer(None)     # no-op unless Langfuse is enabled
         self.toolbox = toolbox
         self.storage = storage
         self.cfg = config
@@ -104,6 +106,15 @@ class ChatBot:
     # ----------------------------------------------------------------- turn
     async def _turn(self, conversation_id: str, text: str) -> TurnResult:
         conv = self.storage.get_or_create(conversation_id)
+        with self.tracer.turn(conversation_id, conv.customer, text) as trace:
+            result = await self._traced_turn(conv, text, trace)
+            trace.root.set(output=result.reply, metadata={
+                **trace.root.fields["metadata"], "status": result.status,
+                "tool_calls": [c["name"] for c in result.tool_calls], **result.usage})
+            return result
+
+    async def _traced_turn(self, conv: Conversation, text: str, trace: Turn) -> TurnResult:
+        conversation_id = conv.conversation_id
         self.storage.add_message(conversation_id, "user", text)
 
         if conv.status == "handoff":
@@ -112,7 +123,7 @@ class ChatBot:
 
         usage: dict[str, int] = defaultdict(int)
         summary, window = await self._window(conversation_id, conv.summary,
-                                             conv.summarized_through, usage)
+                                             conv.summarized_through, usage, trace)
         messages: list[dict[str, Any]] = [{"role": m.role, "content": m.content} for m in window]
         messages.append({"role": "system",
                          "content": self._context(conversation_id, conv.customer, summary, window)})
@@ -124,11 +135,11 @@ class ChatBot:
 
         try:
             for _ in range(MAX_API_ROUNDS):
-                resp = await self.client.beta.messages.create(
-                    **self._request_kwargs(),
-                    system=self.system, tools=self.tools, tool_choice=tool_choice,
-                    messages=messages,
-                )
+                request = dict(self._request_kwargs(), system=self.system, tools=self.tools,
+                               tool_choice=tool_choice, messages=messages)
+                with trace.generation("llm", request) as gen:
+                    resp = await self.client.beta.messages.create(**request)
+                    gen.response(resp)
                 _add_usage(usage, resp.usage)
 
                 if resp.stop_reason == "refusal":
@@ -144,15 +155,17 @@ class ChatBot:
                         log.warning("max_tokens hit in %s", conversation_id)
                     break
 
-                results, status = await self._run_tools(conversation_id, tool_uses, calls, status)
+                results, status = await self._run_tools(conversation_id, tool_uses, calls,
+                                                        status, trace)
                 _strip_cache_control(messages)          # keep <= 4 breakpoints
                 results[-1]["cache_control"] = {"type": "ephemeral"}
                 messages.append({"role": "user", "content": results})
 
                 if len(calls) >= self.cfg.max_tool_calls:
                     tool_choice = {"type": "none"}      # budget spent: answer with what we have
-        except anthropic.APIError:
+        except anthropic.APIError as e:
             log.exception("Claude API error in %s", conversation_id)
+            trace.root.fail(e)
             reply = MSG_ERROR
 
         if not reply:
@@ -162,7 +175,7 @@ class ChatBot:
         return TurnResult(conversation_id, reply, status, calls, dict(usage))
 
     async def _run_tools(self, conversation_id: str, tool_uses: list[Any],
-                         calls: list[dict[str, Any]], status: str
+                         calls: list[dict[str, Any]], status: str, trace: Turn
                          ) -> tuple[list[dict[str, Any]], str]:
         budget = self.cfg.max_tool_calls - len(calls)
         allowed, denied = tool_uses[:max(budget, 0)], tool_uses[max(budget, 0):]
@@ -173,9 +186,16 @@ class ChatBot:
                 args["conversation_id"] = conversation_id   # never trust a model-supplied id
             return args
 
+        async def call(name: str, args: dict[str, Any]) -> ToolResult:
+            with trace.tool(name, args) as obs:
+                res = await self.toolbox.call(name, args)
+                obs.set(output=res.text)
+                if res.is_error:
+                    obs.fail(res.text)
+                return res
+
         arg_list = [args_for(b) for b in allowed]
-        outcomes = await asyncio.gather(*(self.toolbox.call(b.name, a)
-                                          for b, a in zip(allowed, arg_list)))
+        outcomes = await asyncio.gather(*(call(b.name, a) for b, a in zip(allowed, arg_list)))
         results: list[dict[str, Any]] = []
         for block, args, res in zip(allowed, arg_list, outcomes):   # request order
             self.storage.log_tool_call(conversation_id, block.name, args, res.text, res.is_error)
@@ -187,20 +207,24 @@ class ChatBot:
                 continue
             if block.name == T.FIND_CUSTOMER and res.structured.get("found"):
                 self.storage.set_customer(conversation_id, res.structured["customer"])
+                trace.set_customer(res.structured["customer"])
             elif block.name == T.HANDOFF:
                 self.storage.set_status(conversation_id, "handoff")
                 status = "handoff"
         for block in denied:
-            results.append({
-                "type": "tool_result", "tool_use_id": block.id, "is_error": True,
-                "content": f"Not executed: limit of {self.cfg.max_tool_calls} tool calls per "
-                           "customer message reached. Answer with the data you already have.",
-            })
+            msg = (f"Not executed: limit of {self.cfg.max_tool_calls} tool calls per "
+                   "customer message reached. Answer with the data you already have.")
+            with trace.tool(block.name, dict(block.input or {})) as obs:
+                obs.set(output=msg)
+                obs.fail("Not executed: tool budget spent")
+            results.append({"type": "tool_result", "tool_use_id": block.id, "is_error": True,
+                            "content": msg})
         return results, status
 
     # -------------------------------------------------------- history/summary
     async def _window(self, conversation_id: str, summary: str, through: int,
-                      usage: dict[str, int]) -> tuple[str, list[StoredMessage]]:
+                      usage: dict[str, int], trace: Turn
+                      ) -> tuple[str, list[StoredMessage]]:
         """Last `history_window` messages; anything older is folded into the summary."""
         msgs = self.storage.unsummarized(conversation_id, through)
         cut = max(len(msgs) - self.cfg.history_window, 0)
@@ -210,7 +234,7 @@ class ChatBot:
             return summary, msgs
         overflow, window = msgs[:cut], msgs[cut:]
         try:
-            summary = await self._summarize(summary, overflow, usage)
+            summary = await self._summarize(summary, overflow, usage, trace)
             self.storage.set_summary(conversation_id, summary, overflow[-1].message_id)
             return summary, window
         except Exception:
@@ -219,7 +243,7 @@ class ChatBot:
             return summary, msgs
 
     async def _summarize(self, previous: str, overflow: list[StoredMessage],
-                         usage: dict[str, int]) -> str:
+                         usage: dict[str, int], trace: Turn) -> str:
         lines = []
         for m in overflow:
             who = "Cliente" if m.role == "user" else "Asistente"
@@ -228,13 +252,12 @@ class ChatBot:
                 lines.append(f"  (herramientas: {m.tool_notes})")
         prompt = (f"Resumen anterior:\n{previous or '(vacío)'}\n\n"
                   "Mensajes que salen de la ventana:\n" + "\n".join(lines))
-        resp = await self.client.beta.messages.create(
-            model=self.cfg.summary_model or self.cfg.model,
-            max_tokens=4000,
-            output_config={"effort": "low"},
-            system=SUMMARY_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        request = dict(model=self.cfg.summary_model or self.cfg.model, max_tokens=4000,
+                       output_config={"effort": "low"}, system=SUMMARY_SYSTEM,
+                       messages=[{"role": "user", "content": prompt}])
+        with trace.generation("summary", request) as gen:
+            resp = await self.client.beta.messages.create(**request)
+            gen.response(resp)
         _add_usage(usage, resp.usage)
         if resp.stop_reason == "refusal":
             raise RuntimeError("summary refused")

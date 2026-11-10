@@ -13,6 +13,7 @@ from tests.helpers import FakeClaude, resp, text, tool
 def client(tmp_path, monkeypatch, mock_db):
     monkeypatch.setenv("APP_DB_PATH", str(tmp_path / "app.db"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("LANGFUSE_ENABLED", "false")      # never export from tests
     get_settings.cache_clear()
     from app.main import app
     with TestClient(app) as c:

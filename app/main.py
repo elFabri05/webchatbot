@@ -14,6 +14,7 @@ from app.bot import BotConfig, ChatBot
 from app.config import Settings, get_settings
 from app.mcp_client import MCPConnection, MCPToolbox
 from app.storage import Storage
+from app.tracing import build_tracer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,15 +34,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     db = Path(s.app_db_path)
     storage = Storage(db if db.is_absolute() else ROOT / db)
     client = anthropic.AsyncAnthropic(api_key=s.anthropic_api_key or None)
+    tracer = build_tracer(s)
     async with MCPToolbox(build_connections(s), s.mcp_call_timeout) as toolbox:
         app.state.toolbox = toolbox
         app.state.storage = storage
+        app.state.tracer = tracer
         app.state.bot = ChatBot(client, toolbox, storage, BotConfig(
             model=s.bot_model, summary_model=s.bot_summary_model, effort=s.bot_effort,
             max_tool_calls=s.bot_max_tool_calls, history_window=s.bot_history_window,
             timezone=s.bot_timezone, use_fallbacks=s.bot_fallbacks,
-        ))
-        yield
+        ), tracer)
+        try:
+            yield
+        finally:
+            tracer.shutdown()       # flush pending spans
 
 
 app = FastAPI(title="ISP Support Bot (trial)", lifespan=lifespan)
@@ -124,7 +130,8 @@ async def admin_conversation(conversation_id: str, request: Request) -> dict[str
 async def health(request: Request) -> dict[str, Any]:
     s = get_settings()
     return {"status": "ok", "mcp_signal_server": s.mcp_signal_server,
-            "tools": request.app.state.toolbox.tool_names, "model": s.bot_model}
+            "tools": request.app.state.toolbox.tool_names, "model": s.bot_model,
+            "langfuse": s.langfuse_host if s.langfuse_enabled else None}
 
 
 # --- Debug endpoints: call MCP tools directly (trial only) -----------------
